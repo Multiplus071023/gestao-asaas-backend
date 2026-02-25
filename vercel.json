@@ -1,7 +1,0 @@
-{
-  "rewrites": [
-    { "source": "/api/asaas/:path*", "destination": "/api/proxy?path=:path*" },
-    { "source": "/health",           "destination": "/api/proxy?path=health" },
-    { "source": "/",                 "destination": "/api/proxy?path=" }
-  ]
-}
