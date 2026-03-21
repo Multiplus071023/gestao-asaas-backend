@@ -1,0 +1,167 @@
+// api/nfse.js — Integração Portal Nacional NFS-e
+// Baseado no XML real da nota fiscal (RSA-SHA256 + exc-c14n#WithComments)
+const https  = require("https");
+const zlib   = require("zlib");
+const forge  = require("node-forge");
+
+const API_URLS = {
+  producao:    "sefin.nfse.gov.br",
+  homologacao: "sefin.producaorestrita.nfse.gov.br",
+};
+const API_PATH = "/SefinNacional/nfse";
+
+function parseBody(req) {
+  return new Promise((resolve, reject) => {
+    if (req.body && typeof req.body === "object") return resolve(req.body);
+    let data = "";
+    req.on("data", c => data += c);
+    req.on("end", () => { try { resolve(JSON.parse(data||"{}")); } catch(e){ reject(e); } });
+    req.on("error", reject);
+  });
+}
+
+// ─── Extrai PEM para mTLS ─────────────────────────────────────────────────────
+function extrairPem(certBase64, certSenha) {
+  const pfxB64 = certBase64.replace(/^data:[^;]+;base64,/, "");
+  const pfxDer = forge.util.decode64(pfxB64);
+  const pfx    = forge.pkcs12.pkcs12FromAsn1(forge.asn1.fromDer(pfxDer), certSenha);
+  const certBag = pfx.getBags({ bagType: forge.pki.oids.certBag })[forge.pki.oids.certBag][0];
+  const keyBag  = pfx.getBags({ bagType: forge.pki.oids.pkcs8ShroudedKeyBag })[forge.pki.oids.pkcs8ShroudedKeyBag][0];
+  return {
+    cert: forge.pki.certificateToPem(certBag.cert),
+    key:  forge.pki.privateKeyToPem(keyBag.key),
+    certObj: certBag.cert,
+    keyObj:  keyBag.key,
+  };
+}
+
+// ─── Assina XML com RSA-SHA256 + exc-c14n#WithComments (igual ao portal) ─────
+function assinarXML(xmlStr, pem) {
+  const certDer = forge.asn1.toDer(forge.pki.certificateToAsn1(pem.certObj)).getBytes();
+  const certB64 = forge.util.encode64(certDer);
+
+  // Extrai Id do elemento raiz para Reference URI
+  const idMatch = xmlStr.match(/\bId="([^"]+)"/);
+  const refUri  = idMatch ? `#${idMatch[1]}` : "";
+
+  // Digest SHA-256 do conteúdo
+  const md = forge.md.sha256.create();
+  md.update(forge.util.encodeUtf8(xmlStr));
+  const digestB64 = forge.util.encode64(md.digest().getBytes());
+
+  const signedInfo =
+    `<SignedInfo xmlns="http://www.w3.org/2000/09/xmldsig#">` +
+    `<CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#WithComments" />` +
+    `<SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256" />` +
+    `<Reference URI="${refUri}">` +
+    `<Transforms>` +
+    `<Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature" />` +
+    `<Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#WithComments" />` +
+    `</Transforms>` +
+    `<DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256" />` +
+    `<DigestValue>${digestB64}</DigestValue>` +
+    `</Reference></SignedInfo>`;
+
+  // Assina SignedInfo com RSA-SHA256
+  const md2 = forge.md.sha256.create();
+  md2.update(forge.util.encodeUtf8(signedInfo));
+  const sigB64 = forge.util.encode64(pem.keyObj.sign(md2));
+
+  const sigBlock =
+    `<Signature xmlns="http://www.w3.org/2000/09/xmldsig#">` +
+    signedInfo +
+    `<SignatureValue>${sigB64}</SignatureValue>` +
+    `<KeyInfo><X509Data><X509Certificate>${certB64}</X509Certificate></X509Data></KeyInfo>` +
+    `</Signature>`;
+
+  // Injeta Signature dentro do elemento DPS, antes do fechamento
+  return xmlStr.replace(/(<\/DPS>)\s*$/, sigBlock + "\n$1");
+}
+
+// ─── GZip + Base64 ────────────────────────────────────────────────────────────
+function gzipB64(xmlStr) {
+  return new Promise((resolve, reject) =>
+    zlib.gzip(Buffer.from(xmlStr, "utf8"), (err, buf) =>
+      err ? reject(err) : resolve(buf.toString("base64"))
+    )
+  );
+}
+
+// ─── Chama API REST com mTLS ──────────────────────────────────────────────────
+function chamarAPI(xmlGzB64, hostname, certPem, keyPem) {
+  const body = JSON.stringify({ xml: xmlGzB64 });
+  const buf  = Buffer.from(body, "utf8");
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname, path: API_PATH, method: "POST",
+      headers: { "Content-Type": "application/json", "Accept": "application/json", "Content-Length": buf.length },
+      cert: certPem, key: keyPem, timeout: 30000,
+    }, (res) => {
+      let data = "";
+      res.on("data", c => data += c);
+      res.on("end", () => {
+        console.log("[nfse] HTTP status:", res.statusCode);
+        console.log("[nfse] Response:", data.slice(0, 600));
+        resolve({ status: res.statusCode, body: data });
+      });
+    });
+    req.on("error", reject);
+    req.on("timeout", () => { req.destroy(); reject(new Error("Timeout")); });
+    req.write(buf); req.end();
+  });
+}
+
+// ─── Parse resposta ────────────────────────────────────────────────────────────
+function parsear(body) {
+  try {
+    const j = JSON.parse(body);
+    if (j.chaveAcesso || j.numero || j.numeroNFSe || j.nNFSe)
+      return { sucesso: true, numeroNFSe: j.nNFSe || j.numero || j.numeroNFSe || "", chaveAcesso: j.chaveAcesso || "" };
+    const erros = j.erros || j.listaMensagemRetorno?.mensagemRetorno;
+    const msg = (Array.isArray(erros) ? erros[0]?.Descricao || erros[0]?.descricao : null) ||
+                j.mensagem || j.message || JSON.stringify(j).slice(0, 300);
+    return { sucesso: false, erro: msg };
+  } catch {
+    const num = body.match(/<nNFSe>(\d+)<\/nNFSe>/)?.[1] || body.match(/<Numero>(\d+)<\/Numero>/)?.[1];
+    if (num) return { sucesso: true, numeroNFSe: num };
+    return { sucesso: false, erro: "Resposta: " + body.slice(0, 300) };
+  }
+}
+
+// ─── Handler ──────────────────────────────────────────────────────────────────
+module.exports = async function handler(req, res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST")    return res.status(405).json({ error: "Method not allowed" });
+
+  let body;
+  try { body = await parseBody(req); } catch(e) { return res.status(400).json({ sucesso:false, erro:"Body inválido: "+e.message }); }
+
+  const { xmlDPS, certificado, ambiente } = body;
+  console.log("[nfse] xmlDPS:", !!xmlDPS, "cert:", !!certificado?.base64, "amb:", ambiente);
+
+  if (!xmlDPS)              return res.status(400).json({ sucesso:false, erro:"xmlDPS obrigatório" });
+  if (!certificado?.base64) return res.status(400).json({ sucesso:false, erro:"Certificado não informado" });
+  if (!certificado?.senha)  return res.status(400).json({ sucesso:false, erro:"Senha não informada" });
+
+  let pem;
+  try { pem = extrairPem(certificado.base64, certificado.senha); }
+  catch(e) { return res.status(400).json({ sucesso:false, erro:"Erro no certificado: "+e.message }); }
+
+  let xmlAssinado;
+  try { xmlAssinado = assinarXML(xmlDPS, pem); }
+  catch(e) { return res.status(400).json({ sucesso:false, erro:"Erro ao assinar: "+e.message }); }
+
+  let xmlGzB64;
+  try { xmlGzB64 = await gzipB64(xmlAssinado); }
+  catch(e) { return res.status(500).json({ sucesso:false, erro:"Erro GZip: "+e.message }); }
+
+  const hostname = API_URLS[ambiente] || API_URLS.producao;
+  let resp;
+  try { resp = await chamarAPI(xmlGzB64, hostname, pem.cert, pem.key); }
+  catch(e) { return res.status(502).json({ sucesso:false, erro:"Erro de conexão: "+e.message }); }
+
+  return res.status(200).json(parsear(resp.body));
+};
