@@ -1,0 +1,8 @@
+{
+  "name": "gestao-asaas-backend",
+  "version": "4.0.0",
+  "dependencies": {
+    "node-forge": "^1.3.1",
+    "xml-crypto": "^6.0.0"
+  }
+}
