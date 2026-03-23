@@ -1,0 +1,8 @@
+{
+  "version": 2,
+  "routes": [
+    { "src": "/api/handler", "dest": "/api/handler.js" },
+    { "src": "/api/nfse", "dest": "/api/nfse.js" },
+    { "src": "/api/nfse-cancelar", "dest": "/api/nfse-cancelar.js" }
+  ]
+}
