@@ -10,8 +10,8 @@ module.exports = async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).json({ ok: false, erro: "use POST" });
 
-  const token = req.headers["x-planilha-token"] || "";
-  if (!process.env.PLANILHA_APP_TOKEN || token !== process.env.PLANILHA_APP_TOKEN) {
+  const token = String(req.headers["x-planilha-token"] || "").trim();
+  if (!process.env.PLANILHA_APP_TOKEN || token !== process.env.PLANILHA_APP_TOKEN.trim()) {
     return res.status(401).json({ ok: false, erro: "token da planilha inválido" });
   }
 
