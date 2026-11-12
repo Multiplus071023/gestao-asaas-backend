@@ -5,6 +5,7 @@
     { "src": "/api/nfse", "dest": "/api/nfse.js" },
     { "src": "/api/nfse-cancelar", "dest": "/api/nfse-cancelar.js" },
     { "src": "/api/asaas-webhook", "dest": "/api/asaas-webhook.js" },
-    { "src": "/api/planilha-baixa", "dest": "/api/planilha-baixa.js" }
+    { "src": "/api/planilha-baixa", "dest": "/api/planilha-baixa.js" },
+    { "src": "/api/planilha-cliente", "dest": "/api/planilha-cliente.js" }
   ]
 }
