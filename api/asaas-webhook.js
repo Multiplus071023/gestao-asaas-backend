@@ -6,6 +6,7 @@
 // Variáveis no Vercel: ASAAS_WEBHOOK_TOKEN, ASAAS_API_KEY (para buscar o nome do cliente),
 //   APPS_SCRIPT_URL, APPS_SCRIPT_SECRET
 const { enviarBaixaPlanilha } = require("../lib/planilha");
+const { waitUntil } = require("@vercel/functions");
 
 const EVENTOS = ["PAYMENT_RECEIVED", "PAYMENT_CONFIRMED"];
 
@@ -34,20 +35,22 @@ module.exports = async function handler(req, res) {
   // Responde 200 para eventos que não interessam, senão o Asaas pausa a fila.
   if (!EVENTOS.includes(body.event) || !p.id) return res.status(200).json({ ok: true, ignorado: body.event || "" });
 
-  try {
-    const r = await enviarBaixaPlanilha({
-      origem: "asaas:" + body.event,
-      id: p.id,
-      cliente: await nomeCliente(p.customer),
-      descricao: p.description || "",
-      valor: p.value,
-      valorPago: p.value,
-      data: (p.clientPaymentDate || p.paymentDate || p.confirmedDate || new Date().toISOString()).slice(0, 10),
-    });
-    return res.status(200).json(r);
-  } catch (err) {
-    // Também 200: o erro fica no log do Vercel e o Asaas não trava a fila.
-    console.error("asaas-webhook", err);
-    return res.status(200).json({ ok: false, erro: err.message });
-  }
+  // Responde na hora (o Asaas reenvia se a resposta demorar) e processa em seguida.
+  waitUntil((async () => {
+    try {
+      const r = await enviarBaixaPlanilha({
+        origem: "asaas:" + body.event,
+        id: p.id,
+        cliente: await nomeCliente(p.customer),
+        descricao: p.description || "",
+        valor: p.value,
+        valorPago: p.value,
+        data: (p.clientPaymentDate || p.paymentDate || p.confirmedDate || new Date().toISOString()).slice(0, 10),
+      });
+      console.log("asaas-webhook", p.id, JSON.stringify(r));
+    } catch (err) {
+      console.error("asaas-webhook", p.id, err);
+    }
+  })());
+  return res.status(200).json({ ok: true, recebido: p.id });
 };
